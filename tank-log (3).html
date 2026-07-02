@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#101316" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>Tank Log</title>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+</script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin:0; padding:0; overscroll-behavior-y: none; }
+  .led { font-family: ui-monospace, "SF Mono", "Roboto Mono", monospace; font-variant-numeric: tabular-nums; }
+  @keyframes pulse-glow { 0%,100% { box-shadow: 0 0 0 0 rgba(255,179,2,0.25); } 50% { box-shadow: 0 0 0 10px rgba(255,179,2,0); } }
+  .fab { animation: pulse-glow 2.5s ease-in-out infinite; }
+  .sheet-enter { animation: sheet-in 0.28s cubic-bezier(.2,.8,.2,1); }
+  @keyframes sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .chip { transition: all .15s ease; }
+  .row-in { animation: row-in .25s ease; }
+  @keyframes row-in { from { opacity: 0; transform: translateY(4px);} to { opacity:1; transform:translateY(0);} }
+  .spin { animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ---------- localStorage-backed "window.storage" shim (same shape used by Claude artifacts) ---------- */
+window.storage = {
+  get: async (key) => {
+    const v = localStorage.getItem("tanklog:" + key);
+    if (v === null) throw new Error("missing key");
+    return { key, value: v, shared: false };
+  },
+  set: async (key, value) => {
+    localStorage.setItem("tanklog:" + key, value);
+    return { key, value, shared: false };
+  },
+};
+
+/* ---------- tiny icon helper (emoji-based, no external icon library needed) ---------- */
+const Icon = ({ children, size = 16, className = "", style = {} }) => (
+  <span className={className} style={{ fontSize: size, lineHeight: 1, display: "inline-flex", ...style }}>{children}</span>
+);
+const Spinner = ({ size = 16, className = "" }) => (
+  <span
+    className={`spin inline-block rounded-full border-2 border-current border-t-transparent ${className}`}
+    style={{ width: size, height: size }}
+  />
+);
+
+/* ---------- monoline SVG icon set (Lucide-style, inherits currentColor) ---------- */
+const ICONS = {
+  fuel: '<line x1="3" x2="15" y1="22" y2="22"/><line x1="4" x2="14" y1="9" y2="9"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2 2 2 0 0 0 2-2V9.83a2 2 0 0 0-.59-1.42L18 5"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  up: '<path d="m6 15 6-6 6 6"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
+  flat: '<path d="M5 12h14"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  trendUp: '<path d="M22 7 13.5 15.5l-5-5L2 17"/><path d="M16 7h6v6"/>',
+  trendDown: '<path d="M22 17 13.5 8.5l-5 5L2 7"/><path d="M16 17h6v-6"/>',
+  gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  euro: '<path d="M4 10h12"/><path d="M4 14h9"/><path d="M19 6a7.7 7.7 0 0 0-5.2-2A7.9 7.9 0 0 0 6 12c0 4.4 3.5 8 7.8 8 2 0 3.8-.8 5.2-2"/>',
+  pin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
+  calendar: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 2v4"/><path d="M16 2v4"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  crosshair: '<circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/><path d="M12 6V2"/><path d="M12 22v-4"/>',
+  pencil: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+};
+const Ico = ({ name, size = 16, className = "", style = {}, stroke = 2 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round"
+    className={className} style={{ display: "inline-block", flexShrink: 0, ...style }}
+    dangerouslySetInnerHTML={{ __html: ICONS[name] || "" }} />
+);
+
+const BASE_COUNTRIES = { NL: "Netherlands", DE: "Germany" };
+const PALETTE_DARK = ["#FFB302", "#39D98A", "#5EA0FF", "#FF7A7A", "#C792EA", "#4DD0E1"];
+const PALETTE_LIGHT = ["#9A6B00", "#1E9E5C", "#2563C7", "#D6403F", "#8A46B5", "#0E8C9E"];
+
+const flagEmoji = (code) =>
+  code.toUpperCase().replace(/./g, (ch) => String.fromCodePoint(127397 + ch.charCodeAt(0)));
+
+// All fill-ups took place in 2026.
+const SEED = [
+  { id: "s1", date: "2026-01-01", station: "Shell", country: "NL", price: null, liters: null, cost: 60, odometer: null },
+  { id: "s2", date: "2026-01-04", station: "Argos", country: "NL", price: 1.899, liters: null, cost: 66, odometer: null },
+  { id: "s3", date: "2026-01-17", station: "Argos", country: "NL", price: 1.959, liters: 36, cost: 71, odometer: null },
+  { id: "s4", date: "2026-01-28", station: "Argos", country: "NL", price: 1.899, liters: 38, cost: 71, odometer: null },
+  { id: "s5", date: "2026-02-07", station: "Argos", country: "NL", price: 1.899, liters: 33, cost: 63, odometer: null },
+  { id: "s6", date: "2026-02-17", station: "Argos", country: "NL", price: 1.979, liters: 36, cost: 73, odometer: null },
+  { id: "s7", date: "2026-02-26", station: "Argos", country: "NL", price: 1.969, liters: 32, cost: 63, odometer: null },
+  { id: "s8", date: "2026-03-24", station: "Argos", country: "NL", price: 2.269, liters: 33, cost: 75, odometer: null },
+  { id: "s9", date: "2026-04-06", station: "Argos", country: "NL", price: 2.299, liters: 36, cost: 84, odometer: null },
+  { id: "s10", date: "2026-04-15", station: "Argos", country: "NL", price: 2.219, liters: 32.5, cost: 73, odometer: null },
+  { id: "s11", date: "2026-04-27", station: "Argos", country: "NL", price: 2.199, liters: 35.5, cost: 78, odometer: null },
+  { id: "s12", date: "2026-05-03", station: "Argos", country: "NL", price: 2.319, liters: 30.5, cost: 71, odometer: null },
+  { id: "s13", date: "2026-05-16", station: "Tinq", country: "DE", price: 2.028, liters: 20.5, cost: 42, odometer: null },
+  { id: "s14", date: "2026-05-26", station: "Argos", country: "NL", price: 2.339, liters: 33, cost: 77, odometer: null },
+  { id: "s15", date: "2026-06-06", station: "Haan", country: "NL", price: 2.165, liters: 30, cost: 66, odometer: null },
+  { id: "s16", date: "2026-06-20", station: "Argos", country: "NL", price: 2.119, liters: 33, cost: 70, odometer: null },
+  { id: "s17", date: "2026-07-01", station: "Argos", country: "NL", price: 2.189, liters: 33, cost: 72, odometer: 87942 },
+];
+
+const fmtDate = (iso) => {
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+};
+const fmtEUR = (n) => (n == null ? "—" : `€${n.toFixed(2)}`);
+const fmtPrice = (n) => (n == null ? "—" : `€${n.toFixed(3)}`);
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+/* ---------- lightweight inline SVG charts (no external chart library) ---------- */
+function MiniLineChart({ data, colorFor, theme }) {
+  const isLight = theme === "light";
+  const w = 320, h = 160, padL = 34, padR = 10, padT = 10, padB = 20;
+  const prices = data.map((d) => d.price);
+  const min = Math.min(...prices) - 0.04, max = Math.max(...prices) + 0.04;
+  const x = (i) => padL + (i / (data.length - 1 || 1)) * (w - padL - padR);
+  const y = (v) => padT + (1 - (v - min) / (max - min)) * (h - padT - padB);
+  const points = data.map((d, i) => `${x(i)},${y(d.price)}`).join(" ");
+  const gridColor = isLight ? "#E4E0D6" : "#22262A";
+  const axisColor = isLight ? "#8B8577" : "#565C63";
+  const lineColor = isLight ? "#9A6B00" : "#FFB302";
+  const dotStroke = isLight ? "#FFFFFF" : "#101316";
+  const yTicks = [min, (min + max) / 2, max];
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full">
+      {yTicks.map((t, i) => (
+        <g key={i}>
+          <line x1={padL} x2={w - padR} y1={y(t)} y2={y(t)} stroke={gridColor} strokeDasharray="3 3" />
+          <text x={padL - 6} y={y(t) + 3} fontSize="8" fill={axisColor} textAnchor="end">{t.toFixed(2)}</text>
+        </g>
+      ))}
+      <polyline points={points} fill="none" stroke={lineColor} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+      {data.map((d, i) => (
+        <circle key={i} cx={x(i)} cy={y(d.price)} r={d.country !== "NL" ? 4.5 : 2.8}
+          fill={d.country !== "NL" ? colorFor(d.country) : lineColor}
+          stroke={d.country !== "NL" ? dotStroke : "none"} strokeWidth={d.country !== "NL" ? 1.5 : 0} />
+      ))}
+      <text x={padL} y={h - 4} fontSize="8" fill={axisColor}>{fmtDate(data[0].date)}</text>
+      <text x={w - padR} y={h - 4} fontSize="8" fill={axisColor} textAnchor="end">{fmtDate(data[data.length - 1].date)}</text>
+    </svg>
+  );
+}
+
+function MiniBarChart({ data, theme }) {
+  const isLight = theme === "light";
+  const w = 320, h = 120, padL = 30, padR = 6, padT = 8, padB = 18;
+  const max = Math.max(...data.map((d) => d.total), 1);
+  const barW = (w - padL - padR) / data.length;
+  const axisColor = isLight ? "#8B8577" : "#565C63";
+  const gridColor = isLight ? "#E4E0D6" : "#22262A";
+  const barColor = isLight ? "#B8860B" : "#FFB302";
+  const [hover, setHover] = useState(null);
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full">
+      <line x1={padL} x2={w - padR} y1={h - padB} y2={h - padB} stroke={gridColor} />
+      {data.map((d, i) => {
+        const bh = ((h - padT - padB) * d.total) / max;
+        const bx = padL + i * barW + barW * 0.15;
+        const bw = barW * 0.7;
+        const by = h - padB - bh;
+        return (
+          <g key={i} onClick={() => setHover(hover === i ? null : i)}>
+            <rect x={bx} y={by} width={bw} height={bh} rx="3" fill={barColor} opacity={hover === i ? 1 : 0.9} />
+            <text x={bx + bw / 2} y={h - padB + 10} fontSize="8" fill={axisColor} textAnchor="middle">{d.label}</text>
+            {hover === i && (
+              <text x={bx + bw / 2} y={by - 4} fontSize="8" fontWeight="600" fill={isLight ? "#201D19" : "#EDE7DA"} textAnchor="middle">
+                {fmtEUR(d.total)}
+              </text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function TankLog() {
+  const [entries, setEntries] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [theme, setTheme] = useState("dark");
+  const [detecting, setDetecting] = useState(false);
+  const [geoNote, setGeoNote] = useState("");
+  const countryTouched = useRef(false);
+  const [newStationInput, setNewStationInput] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    station: "", country: "NL", price: "", liters: "", cost: "", odometer: "",
+  });
+
+  const c = (dark, light) => (theme === "light" ? light : dark);
+  const isLight = theme === "light";
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get("fuel-entries", false);
+        if (res && res.value) setEntries(JSON.parse(res.value));
+        else {
+          setEntries(SEED);
+          await window.storage.set("fuel-entries", JSON.stringify(SEED), false);
+        }
+      } catch {
+        setEntries(SEED);
+      }
+      try {
+        const t = await window.storage.get("tank-log-theme", false);
+        if (t && (t.value === "light" || t.value === "dark")) setTheme(t.value);
+      } catch {}
+    })();
+  }, []);
+
+  const toggleTheme = async () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    try { await window.storage.set("tank-log-theme", next, false); } catch {}
+  };
+
+  const persist = async (next) => {
+    setEntries(next);
+    setSaving(true);
+    try { await window.storage.set("fuel-entries", JSON.stringify(next), false); }
+    catch (e) { console.error(e); }
+    finally { setSaving(false); }
+  };
+
+  const sorted = useMemo(
+    () => (entries ? [...entries].sort((a, b) => a.date.localeCompare(b.date)) : []),
+    [entries]
+  );
+
+  const enriched = useMemo(() => {
+    return sorted.map((e, i) => {
+      const prev = i > 0 ? sorted[i - 1] : null;
+      const daysSince = prev ? Math.round((new Date(e.date) - new Date(prev.date)) / 86400000) : null;
+      const kmSince = prev && e.odometer != null && prev.odometer != null ? e.odometer - prev.odometer : null;
+      const lPer100 = kmSince && kmSince > 0 && e.liters ? (e.liters / kmSince) * 100 : null;
+      const costPerKm = kmSince && kmSince > 0 ? e.cost / kmSince : null;
+      return { ...e, daysSince, kmSince, lPer100, costPerKm };
+    });
+  }, [sorted]);
+
+  const latestEnriched = enriched.length ? enriched[enriched.length - 1] : null;
+  const latest = sorted.length ? sorted[sorted.length - 1] : null;
+  const prevWithPrice = sorted.filter((e) => e.price != null);
+  const prevPrice = prevWithPrice.length > 1 ? prevWithPrice[prevWithPrice.length - 2].price : null;
+
+  const stations = useMemo(() => {
+    const seen = [];
+    [...sorted].reverse().forEach((e) => { if (e.station && !seen.includes(e.station)) seen.push(e.station); });
+    return seen;
+  }, [sorted]);
+
+  const countryList = useMemo(() => {
+    const map = { ...BASE_COUNTRIES };
+    sorted.forEach((e) => { if (e.country && !map[e.country]) map[e.country] = e.country; });
+    return map;
+  }, [sorted]);
+
+  const palette = isLight ? PALETTE_LIGHT : PALETTE_DARK;
+  const colorFor = (code) => {
+    const idx = Object.keys(countryList).indexOf(code) % palette.length;
+    return palette[idx] || "#8b8f94";
+  };
+
+  const stats = useMemo(() => {
+    const withPrice = sorted.filter((e) => e.price != null);
+    if (!withPrice.length) return null;
+    const avg = withPrice.reduce((s, e) => s + e.price, 0) / withPrice.length;
+    const cheapest = withPrice.reduce((a, b) => (a.price < b.price ? a : b));
+    const priciest = withPrice.reduce((a, b) => (a.price > b.price ? a : b));
+    const totalSpent = sorted.reduce((s, e) => s + (e.cost || 0), 0);
+    const byCountry = {};
+    withPrice.forEach((e) => { byCountry[e.country] = byCountry[e.country] || []; byCountry[e.country].push(e.price); });
+    const countryAvg = Object.fromEntries(Object.entries(byCountry).map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length]));
+    const withConsumption = enriched.filter((e) => e.lPer100 != null);
+    const avgLPer100 = withConsumption.length ? withConsumption.reduce((s, e) => s + e.lPer100, 0) / withConsumption.length : null;
+    const withCostPerKm = enriched.filter((e) => e.costPerKm != null);
+    const avgCostPerKm = withCostPerKm.length ? withCostPerKm.reduce((s, e) => s + e.costPerKm, 0) / withCostPerKm.length : null;
+    return { avg, cheapest, priciest, totalSpent, countryAvg, avgLPer100, avgCostPerKm };
+  }, [sorted, enriched]);
+
+  const chartData = sorted.filter((e) => e.price != null)
+    .map((e) => ({ date: e.date, price: e.price, country: e.country, station: e.station }));
+
+  const monthly = useMemo(() => {
+    const map = {};
+    sorted.forEach((e) => {
+      const key = e.date.slice(0, 7);
+      if (!map[key]) map[key] = { key, total: 0, count: 0 };
+      map[key].total += e.cost || 0;
+      map[key].count += 1;
+    });
+    return Object.values(map).sort((a, b) => a.key.localeCompare(b.key))
+      .map((m) => ({ ...m, label: new Date(m.key + "-01T00:00:00").toLocaleDateString("en-GB", { month: "short" }), total: +m.total.toFixed(2) }));
+  }, [sorted]);
+  const avgMonthlySpend = monthly.length ? monthly.reduce((s, m) => s + m.total, 0) / monthly.length : 0;
+  const thisMonth = monthly.length ? monthly[monthly.length - 1] : null;
+
+  const openSheet = (entryToEdit) => {
+    countryTouched.current = false;
+    setNewStationInput(false);
+    setError("");
+    if (entryToEdit) {
+      setEditingId(entryToEdit.id);
+      setForm({
+        date: entryToEdit.date, station: entryToEdit.station, country: entryToEdit.country,
+        price: entryToEdit.price ?? "", liters: entryToEdit.liters ?? "", cost: entryToEdit.cost ?? "", odometer: entryToEdit.odometer ?? "",
+      });
+      countryTouched.current = true;
+    } else {
+      setEditingId(null);
+      setForm({ date: new Date().toISOString().slice(0, 10), station: stations[0] || "", country: latest?.country || "NL", price: "", liters: "", cost: "", odometer: "" });
+      setGeoNote("");
+      detectLocation();
+    }
+    setSheetOpen(true);
+  };
+
+  const detectLocation = () => {
+    if (!navigator.geolocation) return;
+    setDetecting(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const { latitude, longitude } = pos.coords;
+          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+          const data = await res.json();
+          const code = data?.countryCode;
+          if (code && !countryTouched.current) {
+            setForm((f) => ({ ...f, country: code }));
+            setGeoNote(`Detected: ${data.countryName || code}`);
+          }
+        } catch { setGeoNote(""); }
+        finally { setDetecting(false); }
+      },
+      () => { setDetecting(false); setGeoNote(""); },
+      { timeout: 6000 }
+    );
+  };
+
+  const computedCost = form.price && form.liters ? +(parseFloat(form.price) * parseFloat(form.liters)).toFixed(2) : form.cost || "";
+
+  const saveEntry = async () => {
+    const price = form.price ? parseFloat(form.price) : null;
+    const liters = form.liters ? parseFloat(form.liters) : null;
+    const odometer = form.odometer !== "" ? parseFloat(form.odometer) : null;
+    let cost = form.cost ? parseFloat(form.cost) : null;
+    if (cost == null && price != null && liters != null) cost = +(price * liters).toFixed(2);
+    if (!form.date) { setError("Pick a date."); return; }
+    if (!form.station.trim()) { setError("Add a station name."); return; }
+    if (cost == null) { setError("Enter the total cost, or both price/L and liters."); return; }
+    setError("");
+    const payload = { date: form.date, station: form.station.trim(), country: form.country, price, liters, cost, odometer };
+    let next;
+    if (editingId) next = entries.map((e) => (e.id === editingId ? { ...e, ...payload } : e));
+    else next = [...entries, { id: uid(), ...payload }];
+    await persist(next);
+    setEditingId(null);
+    setSheetOpen(false);
+  };
+
+  const exportCSV = () => {
+    const header = ["Date", "Station", "Country", "Price per L (EUR)", "Liters", "Cost (EUR)", "Odometer (km)", "Days since last", "Km since last", "L/100km", "Cost/km (EUR)"];
+    const rows = enriched.map((e) => [
+      e.date, e.station, e.country, e.price ?? "", e.liters ?? "", e.cost ?? "", e.odometer ?? "",
+      e.daysSince ?? "", e.kmSince ?? "", e.lPer100 != null ? e.lPer100.toFixed(2) : "", e.costPerKm != null ? e.costPerKm.toFixed(3) : "",
+    ]);
+    const csv = [header, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "tank-log.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const removeEntry = async (id) => persist(entries.filter((e) => e.id !== id));
+
+  if (!entries) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center ${c("bg-[#101316]", "bg-[#F7F5F0]")}`}>
+        <Spinner size={28} className="text-[#FFB302]" />
+      </div>
+    );
+  }
+
+  const trend = prevPrice != null && latest?.price != null ? latest.price - prevPrice : null;
+
+  return (
+    <div className={`min-h-screen font-sans transition-colors duration-300 ${c("bg-[#101316] text-[#EDE7DA]", "bg-[#F7F5F0] text-[#201D19]")}`}>
+     <div className="relative max-w-[480px] mx-auto pb-28 overflow-x-hidden">
+      <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 w-80 h-80 rounded-full bg-[#FFB302]/10 blur-[80px]" />
+
+      <div className="relative px-5 pt-8 pb-2 flex items-center gap-3">
+        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center border ${c("bg-[#1A1F23] border-white/10", "bg-white border-black/[0.07]")}`}>
+          <Ico name="fuel" size={18} className="text-[#FFB302]" />
+        </div>
+        <div className="flex-1">
+          <h1 className="text-lg font-semibold tracking-tight">Tank Log</h1>
+          <p className={`text-xs ${c("text-[#6B7280]", "text-[#6B675C]")}`}>Eur95 (E10) fill-up tracker</p>
+        </div>
+        <button onClick={toggleTheme} aria-label="Toggle theme"
+          className={`w-9 h-9 rounded-full flex items-center justify-center border transition-colors ${c("bg-[#1A1F23] border-white/10", "bg-white border-black/[0.07]")}`}>
+          <Ico name={isLight ? "moon" : "sun"} size={16} />
+        </button>
+      </div>
+
+      {latest && (
+        <div className={`relative mx-5 mt-3 rounded-3xl p-6 overflow-hidden border bg-gradient-to-b ${c("from-[#12211A] to-[#0D1512] border-[#26382E]", "from-[#EAF3EC] to-[#DCEEE3] border-[#BFE0CC]")}`}>
+          <div className="relative flex items-center justify-between mb-4">
+            <span className={`text-[10px] uppercase tracking-[0.15em] ${c("text-[#5C7A6A]", "text-[#4B6656]")}`}>Last fill-up</span>
+            <span className={`text-xs flex items-center gap-1 ${c("text-[#8AA398]", "text-[#3E5A4B]")}`}>
+              {flagEmoji(latest.country)} {latest.station} · {fmtDate(latest.date)}
+            </span>
+          </div>
+          <div className="relative flex items-end justify-between">
+            <div>
+              <div className="flex items-baseline gap-2">
+                <span className={`led text-[2.75rem] leading-none font-bold tracking-tight ${c("text-[#FFB302]", "text-[#9A6B00]")}`}>{fmtPrice(latest.price)}</span>
+                {trend != null && (
+                  <span className={`flex items-center gap-0.5 text-xs font-medium ${trend > 0 ? c("text-[#FF7A7A]", "text-[#D6403F]") : trend < 0 ? c("text-[#39D98A]", "text-[#1E9E5C]") : c("text-[#6B7280]", "text-[#8B8577]")}`}>
+                    <Ico name={trend > 0 ? "up" : trend < 0 ? "down" : "flat"} size={12} stroke={2.5} />
+                    {Math.abs(trend).toFixed(3)}
+                  </span>
+                )}
+              </div>
+              <div className={`text-[10px] uppercase tracking-wider mt-1 ${c("text-[#5C7A6A]", "text-[#4B6656]")}`}>per liter</div>
+              {latestEnriched?.daysSince != null && (
+                <div className={`flex items-center gap-1 text-[11px] mt-2 ${c("text-[#7A8B82]", "text-[#597564]")}`}>
+                  <Ico name="clock" size={11} />
+                  {latestEnriched.daysSince}d{latestEnriched.kmSince != null && ` · ${latestEnriched.kmSince}km`} since last fill
+                </div>
+              )}
+            </div>
+            <div className="text-right">
+              <div className={`led text-xl ${c("text-[#EDE7DA]", "text-[#201D19]")}`}>{latest.liters ? `${latest.liters} L` : "—"}</div>
+              <div className={`led text-2xl font-semibold mt-0.5 ${c("text-[#39D98A]", "text-[#1E9E5C]")}`}>{fmtEUR(latest.cost)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stats && (
+        <div className="grid grid-cols-2 gap-2.5 mx-5 mt-4">
+          <StatCard theme={theme} label="Avg price/L" value={fmtPrice(stats.avg)} icon={<Ico name="trendUp" size={13} className={c("text-[#5EA0FF]", "text-[#2563C7]")} />} />
+          <StatCard theme={theme} label="Total spent" value={fmtEUR(stats.totalSpent)} icon={<Ico name="fuel" size={13} className={c("text-[#FFB302]", "text-[#9A6B00]")} />} />
+          <StatCard theme={theme} label="Cheapest" value={fmtPrice(stats.cheapest.price)} sub={`${stats.cheapest.station} · ${fmtDate(stats.cheapest.date)}`} icon={<Ico name="trendDown" size={13} className={c("text-[#39D98A]", "text-[#1E9E5C]")} />} accent={c("#39D98A", "#1E9E5C")} />
+          <StatCard theme={theme} label="Priciest" value={fmtPrice(stats.priciest.price)} sub={`${stats.priciest.station} · ${fmtDate(stats.priciest.date)}`} icon={<Ico name="trendUp" size={13} className={c("text-[#FF7A7A]", "text-[#D6403F]")} />} accent={c("#FF7A7A", "#D6403F")} />
+          {stats.avgLPer100 != null && (
+            <StatCard theme={theme} label="Avg consumption" value={`${stats.avgLPer100.toFixed(1)} L/100km`} icon={<Ico name="gauge" size={13} className={c("text-[#C792EA]", "text-[#8A46B5]")} />} />
+          )}
+          {stats.avgCostPerKm != null && (
+            <StatCard theme={theme} label="Avg cost/km" value={`€${stats.avgCostPerKm.toFixed(3)}`} icon={<Ico name="euro" size={13} className={c("text-[#4DD0E1]", "text-[#0E8C9E]")} />} />
+          )}
+        </div>
+      )}
+
+      {stats?.countryAvg && Object.keys(stats.countryAvg).length > 1 && (
+        <div className={`mx-5 mt-3 rounded-2xl border p-3.5 flex items-center justify-between ${c("bg-[#171B1E] border-white/5", "bg-white border-black/[0.06]")}`}>
+          <div className="flex items-center gap-2 text-sm flex-wrap">
+            <Ico name="pin" size={14} className={c("text-[#6B7280]", "text-[#8B8577]")} />
+            {Object.entries(stats.countryAvg).map(([code, avg], i) => (
+              <span key={code} className="flex items-center gap-1">
+                {i > 0 && <span className={c("text-[#4B5563] mx-0.5", "text-[#A9A392] mx-0.5")}>vs</span>}
+                {flagEmoji(code)} <span className="led">{fmtPrice(avg)}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {chartData.length > 1 && (
+        <div className="mx-5 mt-5">
+          <h2 className={`text-[10px] uppercase tracking-[0.15em] mb-2 ${c("text-[#6B7280]", "text-[#8B8577]")}`}>Price per liter over time</h2>
+          <div className={`rounded-2xl border p-3 h-44 ${c("bg-[#171B1E] border-white/5", "bg-white border-black/[0.06]")}`}>
+            <MiniLineChart data={chartData} colorFor={colorFor} theme={theme} />
+          </div>
+          {Object.keys(countryList).length > 1 && (
+            <p className={`text-[10px] mt-1.5 ${c("text-[#565C63]", "text-[#9A9584]")}`}>Colored dots mark fill-ups outside the Netherlands</p>
+          )}
+        </div>
+      )}
+
+      {monthly.length > 1 && (
+        <div className="mx-5 mt-5">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className={`text-[10px] uppercase tracking-[0.15em] flex items-center gap-1.5 ${c("text-[#6B7280]", "text-[#8B8577]")}`}>
+              <Ico name="calendar" size={11} /> Monthly spend
+            </h2>
+            <span className={`text-[10px] ${c("text-[#565C63]", "text-[#9A9584]")}`}>avg {fmtEUR(avgMonthlySpend)}/mo</span>
+          </div>
+          <div className={`rounded-2xl border p-3 h-32 ${c("bg-[#171B1E] border-white/5", "bg-white border-black/[0.06]")}`}>
+            <MiniBarChart data={monthly} theme={theme} />
+          </div>
+          {thisMonth && (
+            <p className={`text-[10px] mt-1.5 ${c("text-[#565C63]", "text-[#9A9584]")}`}>
+              This month: <span className={c("text-[#EDE7DA]", "text-[#201D19]")}>{fmtEUR(thisMonth.total)}</span> across {thisMonth.count} fill-up{thisMonth.count > 1 ? "s" : ""}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="mx-5 mt-6">
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={() => setHistoryOpen((v) => !v)} className="flex items-center gap-1.5">
+            <h2 className={`text-[10px] uppercase tracking-[0.15em] ${c("text-[#6B7280]", "text-[#8B8577]")}`}>
+              History <span className={c("text-[#454B52]", "text-[#B5AF9E]")}>· {sorted.length}</span>
+            </h2>
+            <span className={`flex items-center gap-1 text-[10px] ${c("text-[#6B7280]", "text-[#8B8577]")}`}>
+              {historyOpen ? "Hide" : "Show"}
+              <Ico name="chevronDown" size={12} style={{ transform: historyOpen ? "rotate(180deg)" : "none", transition: "transform .2s" }} />
+            </span>
+          </button>
+          <div className="flex items-center gap-3">
+            {saving && <span className={`text-[10px] ${c("text-[#565C63]", "text-[#9A9584]")}`}>saving…</span>}
+            <button onClick={exportCSV} className={`flex items-center gap-1 text-[10px] ${c("text-[#5EA0FF]", "text-[#2563C7]")}`}>
+              <Ico name="download" size={11} /> Export CSV
+            </button>
+          </div>
+        </div>
+        {historyOpen && (
+          <div className={`rounded-2xl overflow-hidden border ${c("border-white/5 divide-y divide-white/[0.04]", "border-black/[0.06] divide-y divide-black/[0.05]")}`}>
+            {[...enriched].reverse().map((e) => (
+              <div key={e.id} className={`row-in flex items-center justify-between px-3.5 py-3 text-sm ${c("bg-[#141719]", "bg-white")}`}>
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="text-base leading-none">{flagEmoji(e.country)}</span>
+                  <div className="min-w-0">
+                    <div className={`truncate font-medium ${c("text-[#EDE7DA]", "text-[#201D19]")}`}>{e.station}</div>
+                    <div className={`text-[10px] ${c("text-[#6B7280]", "text-[#8B8577]")}`}>
+                      {fmtDate(e.date)}{e.lPer100 != null && <span> · {e.lPer100.toFixed(1)} L/100km</span>}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right">
+                    <div className={`led text-xs ${c("text-[#FFB302]", "text-[#9A6B00]")}`}>{fmtPrice(e.price)}</div>
+                    <div className={`text-[10px] ${c("text-[#6B7280]", "text-[#8B8577]")}`}>{e.liters ? `${e.liters}L` : ""}</div>
+                  </div>
+                  <div className="led text-sm w-14 text-right font-medium">{fmtEUR(e.cost)}</div>
+                  <button onClick={() => openSheet(e)} className={c("text-[#4B5563]", "text-[#B5AF9E]")}><Ico name="pencil" size={14} /></button>
+                  <button onClick={() => removeEntry(e.id)} className={c("text-[#4B5563]", "text-[#B5AF9E]")}><Ico name="trash" size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button onClick={() => openSheet()} style={{ right: "max(1.25rem, calc(50% - 240px + 1.25rem))" }} className="fab fixed bottom-6 w-14 h-14 rounded-full bg-[#FFB302] text-[#101316] flex items-center justify-center shadow-lg active:scale-95 transition-transform z-40" aria-label="Log a fill-up">
+        <Ico name="plus" size={26} stroke={2.5} />
+      </button>
+
+      {sheetOpen && (
+        <div className="fixed inset-0 z-50 flex items-end">
+          <div className={`absolute inset-0 backdrop-blur-sm ${c("bg-black/60", "bg-black/30")}`} onClick={() => setSheetOpen(false)} />
+          <div className={`sheet-enter relative w-full mx-auto max-w-[480px] rounded-t-3xl border-t p-5 pb-8 max-h-[88vh] overflow-y-auto ${c("bg-[#15181B] border-white/10 text-[#EDE7DA]", "bg-white border-black/[0.08] text-[#201D19]")}`}>
+            <div className={`w-10 h-1 rounded-full mx-auto mb-4 ${c("bg-white/15", "bg-black/10")}`} />
+            <div className="flex items-center justify-between mb-5">
+              <span className="text-base font-semibold">{editingId ? "Edit fill-up" : "Log a fill-up"}</span>
+              <button onClick={() => setSheetOpen(false)}><Ico name="x" size={18} className={c("text-[#6B7280]", "text-[#8B8577]")} /></button>
+            </div>
+
+            <div className="space-y-4">
+              <Field theme={theme} label="Date">
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })}
+                  className={`w-full border rounded-xl px-3 py-2.5 text-sm ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+              </Field>
+
+              <Field theme={theme} label="Station">
+                {!newStationInput ? (
+                  <div className="flex flex-wrap gap-2">
+                    {stations.map((s) => (
+                      <button key={s} onClick={() => setForm({ ...form, station: s })}
+                        className={`chip px-3 py-1.5 rounded-full text-sm border ${form.station === s ? c("border-[#FFB302] bg-[#FFB302]/10 text-[#FFB302]", "border-[#9A6B00] bg-[#9A6B00]/10 text-[#9A6B00]") : c("border-white/10 text-[#C7C2B6]", "border-black/10 text-[#514C40]")}`}>
+                        {s}
+                      </button>
+                    ))}
+                    <button onClick={() => { setNewStationInput(true); setForm({ ...form, station: "" }); }}
+                      className={`chip px-3 py-1.5 rounded-full text-sm border border-dashed flex items-center gap-1 ${c("border-white/20 text-[#6B7280]", "border-black/20 text-[#8B8577]")}`}>
+                      <Ico name="plus" size={12} /> New
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex gap-2">
+                    <input autoFocus type="text" placeholder="Station name" value={form.station}
+                      onChange={(e) => setForm({ ...form, station: e.target.value })}
+                      className={`flex-1 border rounded-xl px-3 py-2.5 text-sm ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+                    <button onClick={() => setNewStationInput(false)} className={`px-3 rounded-xl border ${c("border-white/10 text-[#6B7280]", "border-black/10 text-[#8B8577]")}`}>
+                      <Ico name="check" size={16} />
+                    </button>
+                  </div>
+                )}
+              </Field>
+
+              <Field theme={theme} label={
+                <span className="flex items-center gap-1.5">
+                  Country
+                  <button onClick={detectLocation} className={`flex items-center gap-1 normal-case tracking-normal text-[10px] ${c("text-[#5EA0FF]", "text-[#2563C7]")}`}>
+                    {detecting ? <Spinner size={11} /> : <Ico name="crosshair" size={11} />}
+                    {detecting ? "detecting…" : geoNote || "detect"}
+                  </button>
+                </span>
+              }>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(countryList).map(([code]) => (
+                    <button key={code} onClick={() => { countryTouched.current = true; setForm({ ...form, country: code }); }}
+                      className={`chip px-3 py-1.5 rounded-full text-sm border ${form.country === code ? c("border-[#FFB302] bg-[#FFB302]/10 text-[#FFB302]", "border-[#9A6B00] bg-[#9A6B00]/10 text-[#9A6B00]") : c("border-white/10 text-[#C7C2B6]", "border-black/10 text-[#514C40]")}`}>
+                      {flagEmoji(code)} {code}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <div className="grid grid-cols-2 gap-3">
+                <Field theme={theme} label="Price/L (€)">
+                  <input type="number" step="0.001" inputMode="decimal" placeholder="2.189" value={form.price}
+                    onChange={(e) => setForm({ ...form, price: e.target.value })}
+                    className={`w-full border rounded-xl px-3 py-2.5 text-sm led ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+                </Field>
+                <Field theme={theme} label="Liters">
+                  <input type="number" step="0.1" inputMode="decimal" placeholder="33" value={form.liters}
+                    onChange={(e) => setForm({ ...form, liters: e.target.value })}
+                    className={`w-full border rounded-xl px-3 py-2.5 text-sm led ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+                </Field>
+              </div>
+
+              <Field theme={theme} label="Odometer (km) · optional">
+                <input type="number" step="1" inputMode="numeric" placeholder="e.g. 84210" value={form.odometer}
+                  onChange={(e) => setForm({ ...form, odometer: e.target.value })}
+                  className={`w-full border rounded-xl px-3 py-2.5 text-sm led ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+              </Field>
+
+              <Field theme={theme} label={`Total cost (€)${form.price && form.liters ? " · auto-filled" : ""}`}>
+                <input type="number" step="0.01" inputMode="decimal" placeholder="72.24" value={computedCost}
+                  onChange={(e) => setForm({ ...form, cost: e.target.value })}
+                  className={`w-full border rounded-xl px-3 py-2.5 text-sm led ${c("bg-[#0F1214] border-white/10 text-[#EDE7DA]", "bg-[#F0EDE6] border-black/10 text-[#201D19]")}`} />
+              </Field>
+
+              <button onClick={saveEntry} className="w-full rounded-xl bg-[#FFB302] text-[#101316] font-semibold py-3 text-sm active:scale-[0.98] transition-transform">
+                {editingId ? "Save changes" : "Save fill-up"}
+              </button>
+              {error && (
+                <p className={`text-xs text-center -mt-1 ${c("text-[#FF7A7A]", "text-[#D6403F]")}`}>{error}</p>
+              )}
+              {editingId && (
+                <button onClick={() => { removeEntry(editingId); setSheetOpen(false); }}
+                  className={`w-full rounded-xl border font-medium py-2.5 text-sm active:scale-[0.98] transition-transform ${c("border-[#FF7A7A]/30 text-[#FF7A7A]", "border-[#D6403F]/40 text-[#D6403F]")}`}>
+                  Delete this fill-up
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+     </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, icon, accent, theme }) {
+  const c = (dark, light) => (theme === "light" ? light : dark);
+  return (
+    <div className={`rounded-2xl border p-3.5 ${c("bg-[#171B1E] border-white/5", "bg-white border-black/[0.06]")}`} style={accent ? { boxShadow: `inset 2px 0 0 ${accent}` } : {}}>
+      <div className={`flex items-center gap-1.5 text-[10px] uppercase tracking-wider mb-1.5 ${c("text-[#6B7280]", "text-[#8B8577]")}`}>{icon} {label}</div>
+      <div className={`led text-lg font-medium ${c("text-[#EDE7DA]", "text-[#201D19]")}`}>{value}</div>
+      {sub && <div className={`text-[10px] mt-0.5 truncate ${c("text-[#565C63]", "text-[#9A9584]")}`}>{sub}</div>}
+    </div>
+  );
+}
+
+function Field({ label, children, theme }) {
+  const c = (dark, light) => (theme === "light" ? light : dark);
+  return (
+    <label className="block">
+      <span className={`flex justify-between items-center text-[10px] uppercase tracking-wider mb-1.5 ${c("text-[#6B7280]", "text-[#8B8577]")}`}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<TankLog />);
+</script>
+<script>
+  var src = document.getElementById("app-source").textContent;
+  var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+  (0, eval)(out);
+</script>
+</body>
+</html>
